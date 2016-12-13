@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <inttypes.h>
 
+#include <mpi.h>
+
 #include "mem-eater.c"
 
 #ifndef VERSION
@@ -17,10 +19,13 @@
 #define VERSION "unknown"
 #endif
 
+static int rank;
+static int size;
+
 enum locality{
-   LOCALITY_OFF0 = 0, 
-   LOCALITY_SEQUENTIAL = 1, 
-   LOCALITY_RANDOM = 2,  
+   LOCALITY_OFF0 = 0,
+   LOCALITY_SEQUENTIAL = 1,
+   LOCALITY_RANDOM = 2,
    LOCALITY_STRIDED = 3,
    LOCALITY_RANDOM_NEARBY = 4,
    LOCALITY_REVERSE_STRIDED = 5,
@@ -31,16 +36,16 @@ struct options{
    char * filename;
    size_t memoryBufferInMiB;
    size_t fileSizeInMiB;
-   size_t maxRepeats;   
+   size_t maxRepeats;
    size_t accessSize;
    size_t preallocateMemoryInMiB;
 
-   enum locality localityInMemory; 
+   enum locality localityInMemory;
    enum locality localityInFile;
 
    // based on the locality setting
    size_t localityMemParameter;
-   size_t localityFileParameter;   
+   size_t localityFileParameter;
 
    size_t localityMemParameter2;
    size_t localityFileParameter2;
@@ -50,6 +55,7 @@ struct options{
    int preWriteFile;
    int isRead;
    int isWaitForProperSize;
+   int printOffsets;
 };
 
 struct runtime{
@@ -88,7 +94,7 @@ static char * mmalloc(size_t size){
    char * buff = malloc(size);
    if (buff == NULL){
       printf("Error could not allocate %llu MiB of memory\n", (long long unsigned) size/1024/1024);
-      exit(1);
+      MPI_Abort(MPI_COMM_WORLD, 1);
    }
    return buff;
 }
@@ -115,7 +121,7 @@ static size_t old_stats[7] = {0,0,0,0,0,0,0};
 static int MYopen(const char *pathname, int flags, mode_t mode){
    int ret;
    ret = open(pathname, flags, mode);
-   if(ret == 0){ 
+   if(ret == 0){
       printf("Error opening %s: %s\n", pathname, strerror(errno));
    }
    return ret;
@@ -124,7 +130,7 @@ static int MYopen(const char *pathname, int flags, mode_t mode){
 static off_t MYlseek(int fd, off_t offset, int whence){
    off_t ret;
    ret = lseek(fd, offset, whence);
-   if(ret == (off_t) -1){ 
+   if(ret == (off_t) -1){
       printf("Error lseek to %llu: %s\n", (long long unsigned) offset, strerror(errno));
    }
 
@@ -132,9 +138,9 @@ static off_t MYlseek(int fd, off_t offset, int whence){
 }
 
 static void checkIOError(size_t expected, size_t returned){
-   if(expected != returned){ 
-      printf("Error while checking for I/O access: \"%s\", %llu != %llu\n", 
-         strerror(errno), 
+   if(expected != returned){
+      printf("Error while checking for I/O access: \"%s\", %llu != %llu\n",
+         strerror(errno),
          (long long unsigned) expected,
          (long long unsigned) returned
         );
@@ -156,7 +162,7 @@ static inline void initMemPos(){
          return;
       }
       case(LOCALITY_RANDOM_NEARBY):{
-         r.curMemPosition = -((int64_t) o.localityMemParameter) + ((size_t) rand()) % (2*o.localityMemParameter); 
+         r.curMemPosition = -((int64_t) o.localityMemParameter) + ((size_t) rand()) % (2*o.localityMemParameter);
          return;
       }
       case(LOCALITY_STRIDED):{
@@ -167,8 +173,8 @@ static inline void initMemPos(){
          r.curMemPosition = o.localityMemParameter + -((int64_t) o.localityMemParameter2) + ((size_t) rand()) % (2*o.localityMemParameter2);
          if (r.curMemPosition > r.lastMemOffset ){
             r.curMemPosition = r.curMemPosition % r.lastMemOffset;
-         }         
-         return;  
+         }
+         return;
       }
       case(LOCALITY_REVERSE_STRIDED):{
          r.curMemPosition = r.lastMemOffset - o.localityMemParameter;
@@ -194,10 +200,10 @@ static inline int64_t pickNextMemPos(){
          return (((size_t) rand())*128) % r.lastMemOffset;
       }
       case(LOCALITY_RANDOM_NEARBY):{
-         int64_t randomValue = - ((int64_t) o.localityMemParameter) + ((size_t) rand()) % (2*o.localityMemParameter); 
+         int64_t randomValue = - ((int64_t) o.localityMemParameter) + ((size_t) rand()) % (2*o.localityMemParameter);
          int64_t targetPos = r.curMemPosition + randomValue;
-         
-         randomValue += randomValue < 0 ? - o.accessSize : o.accessSize; 
+
+         randomValue += randomValue < 0 ? - o.accessSize : o.accessSize;
 
          if ( targetPos < 0 || targetPos > r.lastMemOffset ){
             targetPos = r.curMemPosition - randomValue;
@@ -216,7 +222,7 @@ static inline int64_t pickNextMemPos(){
          int64_t oldPos = r.curMemPosition;
          r.curMemPosition += o.accessSize + o.localityMemParameter;
 
-         int64_t randomValue = - ((int64_t) o.localityMemParameter2) + ((size_t) rand()) % (2*o.localityMemParameter); 
+         int64_t randomValue = - ((int64_t) o.localityMemParameter2) + ((size_t) rand()) % (2*o.localityMemParameter);
 
          r.curMemPosition = r.curMemPosition + randomValue;
          if (r.curMemPosition > r.lastMemOffset ){
@@ -253,16 +259,16 @@ static inline off_t setNextFilePos(int fd){
       }
       case(LOCALITY_RANDOM_NEARBY):{
          off_t   newPos = lseek(fd, 0, SEEK_CUR);
-         int64_t randomValue = - ((int64_t) o.localityFileParameter) + ((size_t) rand()) % (o.localityFileParameter*2); 
+         int64_t randomValue = - ((int64_t) o.localityFileParameter) + ((size_t) rand()) % (o.localityFileParameter*2);
          // add or subtract the lastly accessed data block.
          //printf("xq to %lld %lld\n", (long long int) randomValue, (long long int) newPos);
          if (randomValue < 0 ) {
             randomValue -= 2*o.accessSize;
          }
-         
-         if (newPos + randomValue > r.lastFileffset || newPos + randomValue < 0 ){ 
-            newPos = newPos - randomValue; 
-         }else{ 
+
+         if (newPos + randomValue > r.lastFileffset || newPos + randomValue < 0 ){
+            newPos = newPos - randomValue;
+         }else{
             newPos = newPos + randomValue;
          }
          //printf("jumping to %lld\n", (long long int) newPos);
@@ -287,7 +293,7 @@ static inline off_t setNextFilePos(int fd){
       }
       case(LOCALITY_RANDOM_NEARBY_STRIDE):{
          off_t  newPos = lseek(fd, 0, SEEK_CUR) + o.localityFileParameter;
-         int64_t randomValue = - ((int64_t) o.localityFileParameter2) + ((size_t) rand()) % (o.localityFileParameter2*2); 
+         int64_t randomValue = - ((int64_t) o.localityFileParameter2) + ((size_t) rand()) % (o.localityFileParameter2*2);
 
          // add or subtract the lastly accessed data block.
          //printf("xq to %lld %lld\n", (long long int) randomValue, (long long int) newPos);
@@ -307,7 +313,7 @@ static inline off_t setNextFilePos(int fd){
 typedef ssize_t(*iooperation) (int fd, void *buf, size_t count);
 
 static void runBenchmark(int fd, double * times, size_t repeats, off_t * offsets){
-   Timer t; 
+   Timer t;
 
    iooperation op;
    if (o.isRead){
@@ -318,12 +324,12 @@ static void runBenchmark(int fd, double * times, size_t repeats, off_t * offsets
 
    size_t ret;
    int64_t memPos;
-   
+
    initMemPos();
 
    for (size_t i = 0 ; i < repeats; i++){
       timerStart(& t);
-      
+
       memPos = pickNextMemPos();
       off_t offset = setNextFilePos(fd);
 
@@ -339,6 +345,18 @@ static void runBenchmark(int fd, double * times, size_t repeats, off_t * offsets
    }
 }
 
+void print_data(char * buff){
+  if(rank == 0){
+     printf("%d: %s", 0, buff);
+     for(int i=1; i < size; i++){
+       MPI_Recv(buff, 4096, MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+       printf("%d: %s", i, buff);
+     }
+  }else{
+   MPI_Send(buff, 4096, MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+  }
+}
+
 static void runBenchmarkWrapper(){
    int flags = o.isRead ? O_RDONLY : O_WRONLY | O_CREAT;
    int fd = MYopen(o.filename, flags, S_IRWXU);
@@ -347,7 +365,7 @@ static void runBenchmarkWrapper(){
    double * times = (double*) mmalloc(sizeof(double) * o.maxRepeats);
    off_t * offsets = (off_t*) mmalloc(sizeof(off_t) * o.maxRepeats);
 
-   Timer totalRunTimer; 
+   Timer totalRunTimer;
    timerStart(& totalRunTimer);
 
    // now choose the benchmark to run based on the configuration
@@ -365,7 +383,7 @@ static void runBenchmarkWrapper(){
    // sanity check
    if(r.doneRepeats == 0){
       printf("ERROR: number of repeats == 0\n");
-      exit(1);
+      MPI_Abort(MPI_COMM_WORLD, 1);
    }
 
    runBenchmark(fd, times, r.doneRepeats, offsets);
@@ -376,38 +394,59 @@ static void runBenchmarkWrapper(){
 
    double totalRuntime = timerEnd(& totalRunTimer);
 
-   printf("Runtime:%.12fs ops/s:%.2f  MiB/s:%.2f repeats:%llu syncTime:%.12fs \n", 
-      totalRuntime,       
+   char buff[4096];
+
+   sprintf(buff, "Runtime:%.12fs ops/s:%.2f  MiB/s:%.2f repeats:%llu syncTime:%.12fs \n",
+      totalRuntime,
       ((float) r.doneRepeats) / totalRuntime,
       ((float) r.doneRepeats * o.accessSize) /1024.0 / 1024.0 / totalRuntime,
       (long long unsigned) r.doneRepeats,
       totalRuntime - syncTime
     );
+    print_data(buff);
 
    // print statistics about the individual measurements
-   printf("Times per operation: %.12f", times[0]);
-   for (size_t i = 1; i < r.doneRepeats; i++){
-      printf(", %.12f", times[i]);
+   if(rank == 0){
+     printf("Times per operation:\n");
+     printf("0: ");
+     for (size_t i = 1; i < r.doneRepeats; i++){
+       printf("%.12f,", times[i]);
+     }
+     printf("\n");
+
+     for(int i=1; i < size; i++){
+       MPI_Recv(times, r.doneRepeats, MPI_DOUBLE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+       printf("%d: ", i);
+       for (size_t i = 1; i < r.doneRepeats; i++){
+         printf("%.12f,", times[i]);
+       }
+       printf("\n");
+     }
+   }else{
+     MPI_Send(times, r.doneRepeats, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
    }
-   printf("\n");
-   printf("Offset per operation: %llu", (long long unsigned) offsets[0]);
-   for (size_t i = 1; i < r.doneRepeats; i++){
-      printf(", %llu",  (long long unsigned)  offsets[i]);
-   }   
-   printf("\n");
+
+
+   if (o.printOffsets){
+     printf("Offset per operation: %llu", (long long unsigned) offsets[0]);
+     for (size_t i = 1; i < r.doneRepeats; i++){
+        printf(", %llu",  (long long unsigned)  offsets[i]);
+     }
+     printf("\n");
+   }
 
    free(times);
    free(offsets);
 }
 
-static void dumpStats(const char * prefix, size_t repeats){      
+static void dumpStats(const char * prefix, size_t repeats){
    // now dump the statistics from /proc/self/io
-   FILE * f = fopen("/proc/self/io", "r");   
+   FILE * f = fopen("/proc/self/io", "r");
    char buff[1023];
    int ret;
    long long unsigned value;
    size_t delta[7] = {0,0,0,0,0,0,0};
-   
+
    for( int i=0; i < 7 ; i++ ){
       ret = fscanf(f, "%s %llu", buff, & value);
       if (ret != 2){
@@ -427,16 +466,31 @@ static void dumpStats(const char * prefix, size_t repeats){
       }
    }
 
+
    if (prefix != NULL){
-      long size = ftell(f);
+      //long size = ftell(f);
       //delta[0] -= size;
       delta[2] -= 1;
 
-      fprintf(r.outputFile, "%s perRepeat", prefix);
+      char buff[4096];
+      int pos = 0;
+      pos += sprintf(buff, "%s perRepeat", prefix);
       for( int i=0; i < 7 ; i++ ){
-         fprintf(r.outputFile, " %s %.1f", stat_names[i], (float) delta[i] / repeats);
+         pos += sprintf(buff + pos, " %s %.1f", stat_names[i], (float) delta[i] / repeats);
       }
-      fprintf(r.outputFile, "\n");
+      pos += sprintf(buff + pos, "\n");
+
+      if(rank == 0){
+        fprintf(r.outputFile, "%d: %s", 0, buff);
+
+        for(int i=1; i < size; i++){
+           MPI_Recv(buff, 4096, MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+           fprintf(r.outputFile, "%d: %s", i, buff);
+         }
+
+      }else{
+        MPI_Send(buff, 4096, MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+      }
    }
    fclose(f);
 }
@@ -447,7 +501,7 @@ static void parseLocality(const char * str, enum locality * locality, size_t * o
    if (strncmp(str, "off0", 5) == 0){
       *locality = LOCALITY_OFF0;
       return ;
-   }   
+   }
    if (strncmp(str, "seq", 4) == 0){
 
       *locality = LOCALITY_SEQUENTIAL;
@@ -456,7 +510,7 @@ static void parseLocality(const char * str, enum locality * locality, size_t * o
    if (strncmp(str, "rnd", 4) == 0){
       *locality = LOCALITY_RANDOM;
       return ;
-   }   
+   }
    if (strncmp(str, "rnd", 3) == 0){
       *out_arg = atoll(& str[3]);
       *locality = LOCALITY_RANDOM_NEARBY;
@@ -469,28 +523,32 @@ static void parseLocality(const char * str, enum locality * locality, size_t * o
          *locality = LOCALITY_RANDOM_NEARBY_STRIDE;
          *out_arg2 = atoll(strstr(& str[6], ",") + 1);
       }else{
-         *locality = LOCALITY_STRIDED;         
-      }      
+         *locality = LOCALITY_STRIDED;
+      }
       return;
    }
    if (strncmp(str, "reverse", 7) == 0){
       *out_arg = atoll(& str[7]);
       *locality = LOCALITY_REVERSE_STRIDED;
       return;
-   }   
+   }
    printf("Error cannot parse locality %s\n", str);
-   exit(1);
+   MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
 int main(int argc, char ** argv){
-   if (argc < 15){
+   MPI_Init(& argc, &argv);
+   MPI_Comm_size(MPI_COMM_WORLD, & size);
+   MPI_Comm_rank(MPI_COMM_WORLD, & rank);
+
+   if (argc < 15 && rank == 0){
       printf("Synopsis: %s <file> <memoryBufferInMiB> <fileSizeInMiB> <MaxRepeats> <Truncate=0|1> <accessSize> <localityInMemory> <localityInFile> <preallocateMemoryRemainsInMiB or all=0> <preWriteMemBuffer> <preWriteFile> <R|W ReadOrWrite> <SEED> <WaitForProperSize=0|1>\n", argv[0]);
 
       printf("Locality:\n");
       printf("off0: always start at offset 0 == 0\n");
       printf("seq: Sequential == 1\n");
       printf("rnd: Random == 2\n");
-      printf("rndX: Random with max X delta offset \n");      
+      printf("rndX: Random with max X delta offset \n");
       printf("strideX: sequential + add hole of size X with X=0 is seq\n");
       printf("strideX,Y: sequential with stride X and y as +-randomOffset\n");
       printf("reverseX: inverse sequential + add hole of size X\n");
@@ -499,10 +557,13 @@ int main(int argc, char ** argv){
       printf("PreWrite means if the memory buffer or File should be completely written with the given size before doing any test\n");
       printf("programversion:%s\n", VERSION);
 
-      exit(1);
+      MPI_Abort(MPI_COMM_WORLD, 1);
    }
 
-   o.filename = argv[1];
+   // prefix rank
+   o.filename = malloc(10+strlen(argv[1]));
+   sprintf(o.filename, "%s-%d", argv[1], rank);
+
    r.outputFile = stdout; //fopen(argv[2], "w");
    o.memoryBufferInMiB = atoll(argv[2]);
    o.fileSizeInMiB = atoll(argv[3]);
@@ -526,31 +587,33 @@ int main(int argc, char ** argv){
    }
    o.isWaitForProperSize = atoi(argv[14]);
 
-   printf("%s file:%s memBuffer:%llu fileSizeInMiB:%llu maxRepeats:%llu truncate:%d accessSize:%llu localityMem:%d-%lld-%lld localityFile:%d-%lld-%lld preallocateMemoryInMiB:%llu preWriteMem:%d preWriteFile:%d isRead:%d seed:%s waitForProperSize:%d programversion:%s\n", 
-      argv[0],
-      o.filename,
-      (long long unsigned) o.memoryBufferInMiB,
-      (long long unsigned) o.fileSizeInMiB,
-      (long long unsigned) o.maxRepeats,
-      o.truncate,
-      (long long unsigned) o.accessSize,
-      o.localityInMemory,     
-      (long long unsigned) o.localityMemParameter, 
-      (long long unsigned) o.localityMemParameter2,
-      o.localityInFile,
-      (long long unsigned) o.localityFileParameter,
-      (long long unsigned) o.localityFileParameter2,
-      (long long unsigned) o.preallocateMemoryInMiB,
-      o.preWriteMem,
-      o.preWriteFile,
-      o.isRead,
-      argv[13],
-      o.isWaitForProperSize,
-      VERSION
-    );
+   if(rank == 0){
+     printf("%s file:%s memBuffer:%llu fileSizeInMiB:%llu maxRepeats:%llu truncate:%d accessSize:%llu localityMem:%d-%lld-%lld localityFile:%d-%lld-%lld preallocateMemoryInMiB:%llu preWriteMem:%d preWriteFile:%d isRead:%d seed:%s waitForProperSize:%d programversion:%s\n",
+        argv[0],
+        o.filename,
+        (long long unsigned) o.memoryBufferInMiB,
+        (long long unsigned) o.fileSizeInMiB,
+        (long long unsigned) o.maxRepeats,
+        o.truncate,
+        (long long unsigned) o.accessSize,
+        o.localityInMemory,
+        (long long unsigned) o.localityMemParameter,
+        (long long unsigned) o.localityMemParameter2,
+        o.localityInFile,
+        (long long unsigned) o.localityFileParameter,
+        (long long unsigned) o.localityFileParameter2,
+        (long long unsigned) o.preallocateMemoryInMiB,
+        o.preWriteMem,
+        o.preWriteFile,
+        o.isRead,
+        argv[13],
+        o.isWaitForProperSize,
+        VERSION
+      );
+    }
 
    // preallocate file?
-   
+
    r.memBufferInBytes = o.memoryBufferInMiB*1024*1024;
    r.fileSizeInByte = o.fileSizeInMiB*1024*1024;
 
@@ -569,7 +632,7 @@ int main(int argc, char ** argv){
 
    // prefill file if needed
    if (o.truncate){
-      int fd = MYopen(o.filename, O_CREAT | O_TRUNC | O_WRONLY, S_IRWXU);      
+      int fd = MYopen(o.filename, O_CREAT | O_TRUNC | O_WRONLY, S_IRWXU);
       close(fd);
    }
 
@@ -604,7 +667,7 @@ int main(int argc, char ** argv){
                waitingIterations++;
             }else{
                printf("Fatal: the file %s should have a size of at least %llu for read tests but has %llu \n", o.filename, (long long unsigned) r.fileSizeInByte, (long long unsigned) statBlock.st_size * 512);
-               exit(1);
+               MPI_Abort(MPI_COMM_WORLD, 1);
             }
          }else{
             break;
@@ -612,7 +675,7 @@ int main(int argc, char ** argv){
       }
       if (waitingIterations == 30){
          printf("Fatal: the file %s should have a size of at least %llu for read tests but has %llu \n", o.filename, (long long unsigned) r.fileSizeInByte, (long long unsigned) statBlock.st_size * 512);
-         exit(1);         
+         MPI_Abort(MPI_COMM_WORLD, 1);
       }
 
       if (waitingIterations > 0) {
@@ -627,11 +690,11 @@ int main(int argc, char ** argv){
 
    if( o.localityMemParameter > r.lastMemOffset){
       printf("Error the mem localization parameter is larger than the mem buffer\n");
-      exit(1);
+      MPI_Abort(MPI_COMM_WORLD, 1);
    }
    if( o.localityFileParameter > r.lastFileffset){
       printf("Error the file localization parameter is larger than the file size\n");
-      exit(1);      
+      MPI_Abort(MPI_COMM_WORLD, 1);
    }
 
    // now preallocate
@@ -646,6 +709,7 @@ int main(int argc, char ** argv){
 
    fflush(r.outputFile);
    free(r.buff);
+   MPI_Finalize();
 
    return 0;
 }
