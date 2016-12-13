@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
 
 #include <mpi.h>
 
@@ -58,6 +59,17 @@ struct options{
    int printOffsets;
 };
 
+struct proc_stats{
+  uint64_t rchar;
+  uint64_t wchar;
+  uint64_t syscr; // read syscalls
+  uint64_t syscw; // write syscalls
+  uint64_t read_bytes; // actually fetched from the storage layer
+  uint64_t write_bytes; // actually written to the storage layer
+};
+
+typedef struct proc_stats proc_stats_t;
+
 struct runtime{
    char * buff;
    FILE * outputFile;
@@ -81,15 +93,6 @@ struct runtime{
 static struct runtime r;
 static struct options o;
 
-/*
-   gcc io-model.c  -std=gnu99 -O0  -lrt -o io-model
-
-   This benchmark performs cached reads and writes to one block with a size of:
-   0, 1, 4, 16, 64, 256, 1024, 4096, 16K, 64K, 256K
-   +1 byte
- */
-
-
 static char * mmalloc(size_t size){
    char * buff = malloc(size);
    if (buff == NULL){
@@ -106,6 +109,10 @@ static void timerStart(Timer *tp)
     clock_gettime(CLOCK_MONOTONIC, tp);
 }
 
+static float timeToFloat(Timer tp){
+  return (tp.tv_sec) + 0.001*0.001*0.001 * (tp.tv_nsec);
+}
+
 static double timerEnd(Timer *start)
 {
     struct timespec tp;
@@ -113,10 +120,25 @@ static double timerEnd(Timer *start)
     return (tp.tv_sec - start->tv_sec) + 0.001*0.001*0.001 * (tp.tv_nsec -start->tv_nsec);
 }
 
+static int finish_background_thread = 0;
 
 static char *stat_names[] = {"rchar:", "wchar:", "syscr:", "syscw:", "read_bytes:", "write_bytes:", "cancelled_write_bytes:"};
-
 static size_t old_stats[7] = {0,0,0,0,0,0,0};
+
+void * background_thread(void * arg){
+  proc_stats_t * p = (proc_stats_t*) arg;
+
+  Timer t;
+  while(! finish_background_thread){
+    timerStart(& t);
+    float ft = timeToFloat(t);
+    printf("%.5f\n", ft);
+    // store current values from proc into: proc_stats_t
+    sleep(1);
+  }
+  return NULL;
+}
+
 
 static int MYopen(const char *pathname, int flags, mode_t mode){
    int ret;
@@ -312,7 +334,7 @@ static inline off_t setNextFilePos(int fd){
 
 typedef ssize_t(*iooperation) (int fd, void *buf, size_t count);
 
-static void runBenchmark(int fd, double * times, size_t repeats, off_t * offsets){
+static void runBenchmark(int fd, double * times, float * start_times, size_t repeats, off_t * offsets){
    Timer t;
 
    iooperation op;
@@ -341,6 +363,7 @@ static void runBenchmark(int fd, double * times, size_t repeats, off_t * offsets
       checkIOError(o.accessSize, ret);
 
       times[i] = timerEnd(& t);
+      start_times[i] = timeToFloat(t);
       offsets[i] = offset;
    }
 }
@@ -363,6 +386,7 @@ static void runBenchmarkWrapper(){
 
    // malloc space to remember our internal measurement
    double * times = (double*) mmalloc(sizeof(double) * o.maxRepeats);
+   float * start_times = (float*) mmalloc(sizeof(float) * o.maxRepeats);
    off_t * offsets = (off_t*) mmalloc(sizeof(off_t) * o.maxRepeats);
 
    Timer totalRunTimer;
@@ -385,14 +409,26 @@ static void runBenchmarkWrapper(){
       printf("ERROR: number of repeats == 0\n");
       MPI_Abort(MPI_COMM_WORLD, 1);
    }
+   pthread_t thread;
+   proc_stats_t * proc_stats;
+   if (rank == 0){
+     proc_stats = (proc_stats_t*) mmalloc(sizeof(proc_stats_t) * o.maxRepeats + 10);
+     // assume at most one second per I/O operation ...
+     pthread_create(& thread, NULL, background_thread, proc_stats);
+   }
 
-   runBenchmark(fd, times, r.doneRepeats, offsets);
+   runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
 
    fsync(fd);
    close(fd);
 
    double totalRuntime = timerEnd(& totalRunTimer);
+   if (rank == 0){
+     int retval;
+     finish_background_thread = 1;
+     pthread_join(thread, (void *) & retval);
+   }
 
    char buff[4096];
 
@@ -406,25 +442,15 @@ static void runBenchmarkWrapper(){
     print_data(buff);
 
    // print statistics about the individual measurements
-   if(rank == 0){
-     printf("Times per operation:\n");
-     printf("0: ");
-     for (size_t i = 1; i < r.doneRepeats; i++){
-       printf("%.12f,", times[i]);
-     }
-     printf("\n");
 
-     for(int i=1; i < size; i++){
-       MPI_Recv(times, r.doneRepeats, MPI_DOUBLE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-       printf("%d: ", i);
-       for (size_t i = 1; i < r.doneRepeats; i++){
-         printf("%.12f,", times[i]);
-       }
-       printf("\n");
-     }
-   }else{
-     MPI_Send(times, r.doneRepeats, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-   }
+    char fname[100];
+    sprintf(fname, "out-%d.csv", rank);
+    FILE * out = fopen(fname, "w");
+    fprintf(out, "start_time, duration, \n");
+    for (size_t i = 1; i < r.doneRepeats; i++){
+     fprintf(out, "%.3f,%.12f\n", start_times[i], times[i]);
+    }
+    fclose(out);
 
 
    if (o.printOffsets){
@@ -437,6 +463,10 @@ static void runBenchmarkWrapper(){
 
    free(times);
    free(offsets);
+
+   if(rank == 0){
+     free(proc_stats);
+   }
 }
 
 static void dumpStats(const char * prefix, size_t repeats){
