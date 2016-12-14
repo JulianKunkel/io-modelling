@@ -56,6 +56,7 @@ struct options{
    int isRead;
    int isWaitForProperSize;
    int printOffsets;
+   char * deviceName;
 };
 
 struct runtime{
@@ -111,9 +112,6 @@ static double timerEnd(Timer *start)
 
 #include "proc-stats.c"
 
-
-static char *stat_names[] = {"rchar:", "wchar:", "syscr:", "syscw:", "read_bytes:", "write_bytes:", "cancelled_write_bytes:"};
-static size_t old_stats[7] = {0,0,0,0,0,0,0};
 
 
 static int MYopen(const char *pathname, int flags, mode_t mode){
@@ -429,67 +427,8 @@ static void runBenchmarkWrapper(){
 
    free(times);
    free(offsets);
-
-   if(rank == 0){
-     free(proc_stats);
-   }
 }
 
-static void dumpStats(const char * prefix, size_t repeats){
-   // now dump the statistics from /proc/self/io
-   FILE * f = fopen("/proc/self/io", "r");
-   char buff[1023];
-   int ret;
-   long long unsigned value;
-   size_t delta[7] = {0,0,0,0,0,0,0};
-
-   for( int i=0; i < 7 ; i++ ){
-      ret = fscanf(f, "%s %llu", buff, & value);
-      if (ret != 2){
-         printf("Error accessing /proc/self/io, read only %d tokens\n", ret);
-         fclose(f);
-         return;
-      }
-      ret = strcmp(buff, stat_names[i]);
-      if (ret != 0){
-         printf("%s %s", buff, stat_names[i]);
-         printf("Error accessing /proc/self/io\n");
-         fclose(f);
-         return;
-      }else{
-         delta[i] = value - old_stats[i];
-         old_stats[i] = value;
-      }
-   }
-
-
-   if (prefix != NULL){
-      //long size = ftell(f);
-      //delta[0] -= size;
-      delta[2] -= 1;
-
-      char buff[4096];
-      int pos = 0;
-      pos += sprintf(buff, "%s perRepeat", prefix);
-      for( int i=0; i < 7 ; i++ ){
-         pos += sprintf(buff + pos, " %s %.1f", stat_names[i], (float) delta[i] / repeats);
-      }
-      pos += sprintf(buff + pos, "\n");
-
-      if(rank == 0){
-        fprintf(r.outputFile, "%d: %s", 0, buff);
-
-        for(int i=1; i < size; i++){
-           MPI_Recv(buff, 4096, MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-           fprintf(r.outputFile, "%d: %s", i, buff);
-         }
-
-      }else{
-        MPI_Send(buff, 4096, MPI_BYTE, 0, 0, MPI_COMM_WORLD);
-      }
-   }
-   fclose(f);
-}
 
 static void parseLocality(const char * str, enum locality * locality, size_t * out_arg, size_t * out_arg2){
    *out_arg = 0;
@@ -537,8 +476,8 @@ int main(int argc, char ** argv){
    MPI_Comm_size(MPI_COMM_WORLD, & size);
    MPI_Comm_rank(MPI_COMM_WORLD, & rank);
 
-   if (argc < 15 && rank == 0){
-      printf("Synopsis: %s <file> <memoryBufferInMiB> <fileSizeInMiB> <MaxRepeats> <Truncate=0|1> <accessSize> <localityInMemory> <localityInFile> <preallocateMemoryRemainsInMiB or all=0> <preWriteMemBuffer> <preWriteFile> <R|W ReadOrWrite> <SEED> <WaitForProperSize=0|1>\n", argv[0]);
+   if (argc < 16 && rank == 0){
+      printf("Synopsis: %s <file> <memoryBufferInMiB> <fileSizeInMiB> <MaxRepeats> <Truncate=0|1> <accessSize> <localityInMemory> <localityInFile> <preallocateMemoryRemainsInMiB or all=0> <preWriteMemBuffer> <preWriteFile> <R|W ReadOrWrite> <SEED> <WaitForProperSize=0|1> <devicename e.g. sdc>\n", argv[0]);
 
       printf("Locality:\n");
       printf("off0: always start at offset 0 == 0\n");
@@ -582,6 +521,7 @@ int main(int argc, char ** argv){
      srand((int) getpid());
    }
    o.isWaitForProperSize = atoi(argv[14]);
+   o.deviceName = argv[15];
 
    if(rank == 0){
      printf("%s file:%s memBuffer:%llu fileSizeInMiB:%llu maxRepeats:%llu truncate:%d accessSize:%llu localityMem:%d-%lld-%lld localityFile:%d-%lld-%lld preallocateMemoryInMiB:%llu preWriteMem:%d preWriteFile:%d isRead:%d seed:%s waitForProperSize:%d programversion:%s\n",
@@ -699,9 +639,8 @@ int main(int argc, char ** argv){
    }
 
    r.doneRepeats = 0;
-   dumpStats(NULL, 1);
    runBenchmarkWrapper();
-   dumpStats("stats", r.doneRepeats);
+   dumpStats(rank, r.doneRepeats);
 
    fflush(r.outputFile);
    free(r.buff);
