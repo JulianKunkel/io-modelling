@@ -9,7 +9,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
-#include <pthread.h>
 
 #include <mpi.h>
 
@@ -58,17 +57,6 @@ struct options{
    int isWaitForProperSize;
    int printOffsets;
 };
-
-struct proc_stats{
-  uint64_t rchar;
-  uint64_t wchar;
-  uint64_t syscr; // read syscalls
-  uint64_t syscw; // write syscalls
-  uint64_t read_bytes; // actually fetched from the storage layer
-  uint64_t write_bytes; // actually written to the storage layer
-};
-
-typedef struct proc_stats proc_stats_t;
 
 struct runtime{
    char * buff;
@@ -120,24 +108,12 @@ static double timerEnd(Timer *start)
     return (tp.tv_sec - start->tv_sec) + 0.001*0.001*0.001 * (tp.tv_nsec -start->tv_nsec);
 }
 
-static int finish_background_thread = 0;
+
+#include "proc-stats.c"
+
 
 static char *stat_names[] = {"rchar:", "wchar:", "syscr:", "syscw:", "read_bytes:", "write_bytes:", "cancelled_write_bytes:"};
 static size_t old_stats[7] = {0,0,0,0,0,0,0};
-
-void * background_thread(void * arg){
-  proc_stats_t * p = (proc_stats_t*) arg;
-
-  Timer t;
-  while(! finish_background_thread){
-    timerStart(& t);
-    float ft = timeToFloat(t);
-    printf("%.5f\n", ft);
-    // store current values from proc into: proc_stats_t
-    sleep(1);
-  }
-  return NULL;
-}
 
 
 static int MYopen(const char *pathname, int flags, mode_t mode){
@@ -409,13 +385,7 @@ static void runBenchmarkWrapper(){
       printf("ERROR: number of repeats == 0\n");
       MPI_Abort(MPI_COMM_WORLD, 1);
    }
-   pthread_t thread;
-   proc_stats_t * proc_stats;
-   if (rank == 0){
-     proc_stats = (proc_stats_t*) mmalloc(sizeof(proc_stats_t) * o.maxRepeats + 10);
-     // assume at most one second per I/O operation ...
-     pthread_create(& thread, NULL, background_thread, proc_stats);
-   }
+   start_background_threads(rank, r.doneRepeats);
 
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
@@ -424,11 +394,7 @@ static void runBenchmarkWrapper(){
    close(fd);
 
    double totalRuntime = timerEnd(& totalRunTimer);
-   if (rank == 0){
-     int retval;
-     finish_background_thread = 1;
-     pthread_join(thread, (void *) & retval);
-   }
+   stop_background_threads(rank);
 
    char buff[4096];
 
