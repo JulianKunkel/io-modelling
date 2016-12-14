@@ -39,7 +39,7 @@ struct proc_stats_pp{
 
 typedef struct proc_stats_pp proc_stats_pp_t;
 
-static int finish_background_thread = 0;
+static volatile int finish_background_thread = 0;
 
 static pthread_t thread;
 static proc_stats_t * proc_stats;

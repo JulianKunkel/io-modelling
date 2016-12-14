@@ -359,9 +359,9 @@ static void runBenchmarkWrapper(){
    int fd = MYopen(o.filename, flags, S_IRWXU);
 
    // malloc space to remember our internal measurement
-   double * times = (double*) mmalloc(sizeof(double) * o.maxRepeats);
-   float * start_times = (float*) mmalloc(sizeof(float) * o.maxRepeats);
-   off_t * offsets = (off_t*) mmalloc(sizeof(off_t) * o.maxRepeats);
+   double * times = (double*) mmalloc(sizeof(double) * (o.maxRepeats + 1));
+   float * start_times = (float*) mmalloc(sizeof(float) * (o.maxRepeats + 1)); // last time is always sync
+   off_t * offsets = (off_t*) mmalloc(sizeof(off_t) * (o.maxRepeats + 1));
 
    Timer totalRunTimer;
    timerStart(& totalRunTimer);
@@ -387,9 +387,14 @@ static void runBenchmarkWrapper(){
 
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
+   Timer sync_only;
+   timerStart(& sync_only);
 
    fsync(fd);
    close(fd);
+
+   times[r.doneRepeats] = timerEnd(& sync_only);
+   start_times[r.doneRepeats] = timeToFloat(sync_only);
 
    double totalRuntime = timerEnd(& totalRunTimer);
    stop_background_threads(rank);
@@ -411,7 +416,7 @@ static void runBenchmarkWrapper(){
     sprintf(fname, "out-%d.csv", rank);
     FILE * out = fopen(fname, "w");
     fprintf(out, "start_time, duration, \n");
-    for (size_t i = 1; i < r.doneRepeats; i++){
+    for (size_t i = 1; i < r.doneRepeats + 1; i++){
      fprintf(out, "%.3f,%.12f\n", start_times[i], times[i]);
     }
     fclose(out);
