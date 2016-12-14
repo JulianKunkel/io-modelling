@@ -11,6 +11,7 @@ s = read.csv("stats-0.csv")
 # facetted tabe
 f = data.frame(time=double(), value=double(), type=factor(), subtype=factor(), stringsAsFactors=FALSE)
 f = rbind(f, data.frame(time = d$start_time[1:(nrow(d)-1)], value = d$duration[1:(nrow(d)-1)], type="Duration", subtype="Duration"))
+f = rbind(f, data.frame(time = d$start_time[1:(nrow(d)-1)], value = log10(d$duration[1:(nrow(d)-1)]), type="Dur. log", subtype="Duration log(10)"))
 
 # special case: blockdev_in_flight
 filter = colnames(s) %in% c("blockdev_in_flight", "meminfo_Buffers.", "meminfo_Cached.", "meminfo_Dirty.", "meminfo_Writeback.")
@@ -26,6 +27,7 @@ for (x in 2:ncol(s)){
 }
 
 mn = min(f$time)
+ms = max(d$start_time)
 f$time = f$time - mn
 # add end time marker
 f = rbind(f, data.frame(time = d$start_time[nrow(d)] + d$duration[nrow(d)] - mn, value = min(d$duration), type="Duration", subtype="end_time"))
@@ -38,3 +40,8 @@ logs = c("Duration")
 ggplot(f, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
 ggsave("results.pdf")
 ggsave("results.png")
+
+subset = f[f$time + mn < ms, ]
+ggplot(subset, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
+ggsave("results-sub.pdf")
+ggsave("results-sub.png")
