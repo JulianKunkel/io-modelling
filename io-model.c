@@ -93,13 +93,15 @@ static char * mmalloc(size_t size){
 
 typedef struct timespec Timer;
 
+static Timer start_time;
+
 static void timerStart(Timer *tp)
 {
     clock_gettime(CLOCK_MONOTONIC, tp);
 }
 
-static float timeToFloat(Timer tp){
-  return (tp.tv_sec) + 0.001*0.001*0.001 * (tp.tv_nsec);
+static double timeSinceStart(Timer tp){
+  return (tp.tv_sec - start_time.tv_sec) + 0.001*0.001*0.001 * (tp.tv_nsec - start_time.tv_nsec);
 }
 
 static double timerEnd(Timer *start)
@@ -308,7 +310,7 @@ static inline off_t setNextFilePos(int fd){
 
 typedef ssize_t(*iooperation) (int fd, void *buf, size_t count);
 
-static void runBenchmark(int fd, double * times, float * start_times, size_t repeats, off_t * offsets){
+static void runBenchmark(int fd, double * times, double * start_times, size_t repeats, off_t * offsets){
    Timer t;
 
    iooperation op;
@@ -337,7 +339,7 @@ static void runBenchmark(int fd, double * times, float * start_times, size_t rep
       checkIOError(o.accessSize, ret);
 
       times[i] = timerEnd(& t);
-      start_times[i] = timeToFloat(t);
+      start_times[i] = timeSinceStart(t);
       offsets[i] = offset;
    }
 }
@@ -360,7 +362,7 @@ static void runBenchmarkWrapper(){
 
    // malloc space to remember our internal measurement
    double * times = (double*) mmalloc(sizeof(double) * (o.maxRepeats + 1));
-   float * start_times = (float*) mmalloc(sizeof(float) * (o.maxRepeats + 1)); // last time is always sync
+   double * start_times = (double*) mmalloc(sizeof(double) * (o.maxRepeats + 1)); // last time is always sync
    off_t * offsets = (off_t*) mmalloc(sizeof(off_t) * (o.maxRepeats + 1));
 
    Timer totalRunTimer;
@@ -386,6 +388,7 @@ static void runBenchmarkWrapper(){
    start_background_threads(rank, r.doneRepeats);
 
    MPI_Barrier(MPI_COMM_WORLD);
+   timerStart(& start_time);
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
    MPI_Barrier(MPI_COMM_WORLD);
@@ -395,7 +398,7 @@ static void runBenchmarkWrapper(){
    close(fd);
 
    times[r.doneRepeats] = timerEnd(& sync_only);
-   start_times[r.doneRepeats] = timeToFloat(sync_only);
+   start_times[r.doneRepeats] = timeSinceStart(sync_only);
 
    double totalRuntime = timerEnd(& totalRunTimer);
    stop_background_threads(rank);
@@ -418,7 +421,7 @@ static void runBenchmarkWrapper(){
     FILE * out = fopen(fname, "w");
     fprintf(out, "start_time, duration, \n");
     for (size_t i = 1; i < r.doneRepeats + 1; i++){
-     fprintf(out, "%.3f,%.12f\n", start_times[i], times[i]);
+     fprintf(out, "%.9f,%.12f\n", start_times[i], times[i]);
     }
     fclose(out);
 

@@ -25,7 +25,7 @@ static char *stat_names_meminfo[] = {"Buffers:", "Cached:", "Dirty:", "Writeback
 static char *stat_names_blockdev[] = {"read I/Os", "read merges", "read sectors", "read ticks", "write I/Os", "write merges", "write sectors", "write ticks", "in_flight", "io_ticks", "time_in_queue", NULL};
 
 struct proc_stats_pp{
-  float time;
+  double time;
 
   // /proc/self/stat
   uint64_t rchar;
@@ -82,7 +82,7 @@ static void addProcStats(int pos){
   }
 }
 
-static void addProcPPStats(int pos, float time){
+static void addProcPPStats(int pos, double time){
   proc_stats_pp_t * p = proc_stats_pp;
 
   p[pos].time = time;
@@ -118,11 +118,11 @@ static void addProcPPStats(int pos, float time){
 static void * background_thread(void * arg){
   Timer t;
   pos_proc_stats = 0;
-  float ft;
+  double ft;
 
   while(! finish_background_thread){
     timerStart(& t);
-    ft = timeToFloat(t);
+    ft = timeSinceStart(t);
     addProcPPStats(pos_proc_stats, ft);
     addProcStats(pos_proc_stats);
     // store current values from proc into: proc_stats_t
@@ -130,7 +130,7 @@ static void * background_thread(void * arg){
     pos_proc_stats++;
   }
   timerStart(& t);
-  ft = timeToFloat(t);
+  ft = timeSinceStart(t);
   addProcPPStats(pos_proc_stats, ft);
   addProcStats(pos_proc_stats);
   pos_proc_stats++;
@@ -141,16 +141,16 @@ static void * background_thread(void * arg){
 static void * background_thread_proc(void * arg){
   Timer t;
   pos_proc_stats=0;
-  float ft;
+  double ft;
   while(! finish_background_thread){
     timerStart(& t);
-    ft = timeToFloat(t);
+    ft = timeSinceStart(t);
     addProcPPStats(pos_proc_stats, ft);
     sleep(1);
     pos_proc_stats++;
   }
   timerStart(& t);
-  ft = timeToFloat(t);
+  ft = timeSinceStart(t);
   addProcPPStats(pos_proc_stats, ft);
   pos_proc_stats++;
 
@@ -223,7 +223,7 @@ void dumpStats(int rank, size_t done_repeats){
     fprintf(out, "\n");
 
     for(int pos=0; pos < pos_proc_stats; pos++){
-      fprintf(out, "%.3f", pp[pos].time);
+      fprintf(out, "%.9f", pp[pos].time);
       curStatName = stat_names_self_io;
       uint64_t * curValue = & pp[pos].rchar;
       while(*curStatName != NULL){
