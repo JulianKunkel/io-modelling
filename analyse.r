@@ -13,6 +13,24 @@ f = data.frame(time=double(), value=double(), type=factor(), subtype=factor(), s
 f = rbind(f, data.frame(time = d$start_time[1:(nrow(d)-1)], value = d$duration[1:(nrow(d)-1)], type="Duration", subtype="Duration"))
 f = rbind(f, data.frame(time = d$start_time[1:(nrow(d)-1)], value = log10(d$duration[1:(nrow(d)-1)]), type="Dur. log", subtype="Duration log(10)"))
 
+png("timeline-simple.png")
+plot(1:(nrow(d)-1), (d$duration[1:(nrow(d)-1)]), xlab="Operation #", ylab="Time (log) in s", log="y", main="")
+dev.off()
+
+png("ecdf.png")
+plot(ecdf(d$duration[1:(nrow(d)-1)]), xlab="Time in log10", ylab="Probability", main="")
+dev.off()
+
+png("density.png")
+plot(density(d$duration[1:(nrow(d)-1)]), xlab="Time in log10", ylab="Density", log="x", main="")
+dev.off()
+
+png("ecdf-log.png")
+plot(ecdf(log10(d$duration[1:(nrow(d)-1)])), xlab="Time in log10", ylab="Probability", main="")
+dev.off()
+
+
+
 # special case: blockdev_in_flight
 filter = colnames(s) %in% c("blockdev_in_flight", "meminfo_Buffers.", "meminfo_Cached.", "meminfo_Dirty.", "meminfo_Writeback.")
 for (x in 2:ncol(s)){
@@ -37,11 +55,12 @@ logs = c("Duration")
 # p2 = ggplot(subset(f, ! type %in% logs),  aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y")
 # grid.arrange(p1,p2)
 
-ggplot(f, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
+
+g = ggplot(f, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
 ggsave("results.pdf")
 ggsave("results.png")
 
 subset = f[f$time + mn < ms, ]
-ggplot(subset, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
+g = ggplot(subset, aes(time, value, col=subtype)) + geom_point() + facet_grid(type ~ ., scales="free_y", switch = 'y')
 ggsave("results-sub.pdf")
 ggsave("results-sub.png")
