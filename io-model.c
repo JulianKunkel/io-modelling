@@ -385,11 +385,12 @@ static void runBenchmarkWrapper(){
    }
    start_background_threads(rank, r.doneRepeats);
 
+   MPI_Barrier(MPI_COMM_WORLD);
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
+   MPI_Barrier(MPI_COMM_WORLD);
    Timer sync_only;
    timerStart(& sync_only);
-
    fsync(fd);
    close(fd);
 
