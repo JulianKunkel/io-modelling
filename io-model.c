@@ -385,10 +385,11 @@ static void runBenchmarkWrapper(){
       printf("ERROR: number of repeats == 0\n");
       MPI_Abort(MPI_COMM_WORLD, 1);
    }
-   start_background_threads(rank, r.doneRepeats);
 
    MPI_Barrier(MPI_COMM_WORLD);
    timerStart(& start_time);
+   start_background_threads(rank, r.doneRepeats);
+   MPI_Barrier(MPI_COMM_WORLD);
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
    MPI_Barrier(MPI_COMM_WORLD);
