@@ -386,9 +386,17 @@ static void runBenchmarkWrapper(){
       MPI_Abort(MPI_COMM_WORLD, 1);
    }
 
-   MPI_Barrier(MPI_COMM_WORLD);
-   timerStart(& start_time);
+   if (rank == 0) {
+     timerStart(& start_time);
+     MPI_Bcast(& start_time, sizeof(start_time), MPI_BYTE, 0, MPI_COMM_WORLD);
+   }else{
+     MPI_Bcast(& start_time, sizeof(start_time), MPI_BYTE, 0, MPI_COMM_WORLD);
+   }
    start_background_threads(rank, r.doneRepeats);
+
+   //Timer tmp;
+   //timerStart(& tmp);
+   //printf("%.10fs %ld %ld\n", timeSinceStart(tmp), start_time.tv_sec, start_time.tv_nsec);
    MPI_Barrier(MPI_COMM_WORLD);
    runBenchmark(fd, times, start_times, r.doneRepeats, offsets);
    double syncTime = timerEnd(& totalRunTimer);
